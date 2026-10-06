@@ -1,0 +1,22 @@
+[Unit]
+Description=Qadrant server (PocketBase)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=qadrant
+Group=qadrant
+WorkingDirectory=/opt/qadrant
+ExecStart=/opt/qadrant/qadrant-server serve --http 127.0.0.1:8090 --dir /opt/qadrant/pb_data
+Environment=QADRANT_VAPID_SUBJECT=mailto:tu-correo@example.com
+# Days and all-day calendar events are computed in this time zone.
+Environment=TZ=Europe/Madrid
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/qadrant/pb_data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
