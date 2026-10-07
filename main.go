@@ -2,6 +2,7 @@
 // Phase 3: access key, VAPID keys, push subscriptions, reminders and a cron
 // that sends due and follow-up notices with webpush-go (docs/02, docs/06).
 // Optional: a read-only calendar from a secret iCal address, refreshed every 15 min.
+// Phase 4: sync of opaque records between the devices of one person (sync.go).
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -30,6 +33,7 @@ func main() {
 
 	var accessKey string
 	var vapid vapidKeys
+	changes := newHub()
 
 	app.OnBootstrap().BindFunc(func(e *core.BootstrapEvent) error {
 		if err := e.Next(); err != nil {
@@ -49,6 +53,9 @@ func main() {
 		if err := ensureCollections(app); err != nil {
 			return err
 		}
+		if err := ensureSyncCollections(app); err != nil {
+			return err
+		}
 		return ensureCalendarCollection(app)
 	})
 
@@ -61,8 +68,13 @@ func main() {
 			return e.Next()
 		})
 
+		// version tells the app what this server can do: 2 and later sync.
 		api.GET("/ping", func(e *core.RequestEvent) error {
-			return e.JSON(http.StatusOK, map[string]any{"ok": true, "version": 1})
+			id, err := syncID(app)
+			if err != nil {
+				return err
+			}
+			return e.JSON(http.StatusOK, map[string]any{"ok": true, "version": apiVersion, "syncId": id})
 		})
 
 		api.GET("/vapid", func(e *core.RequestEvent) error {
@@ -94,8 +106,18 @@ func main() {
 		})
 
 		// The client sends the full list each time tasks change; completed or
-		// deleted tasks simply are not in it any more.
+		// deleted tasks simply are not in it any more. Syncing devices add
+		// ?version=N, the sync version the list comes from: older lists are
+		// ignored, so an outdated device does not drop another one's notices.
 		api.PUT("/reminders", func(e *core.RequestEvent) error {
+			var version *int64
+			if raw := e.Request.URL.Query().Get("version"); raw != "" {
+				n, err := strconv.ParseInt(raw, 10, 64)
+				if err != nil || n < 0 {
+					return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid version"})
+				}
+				version = &n
+			}
 			var list []Reminder
 			if err := json.NewDecoder(http.MaxBytesReader(e.Response, e.Request.Body, 1<<20)).Decode(&list); err != nil {
 				return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
@@ -103,10 +125,19 @@ func main() {
 			if err := validateReminders(list); err != nil {
 				return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			}
-			if err := replaceReminders(app, list); err != nil {
+			ignored := false
+			err := app.RunInTransaction(func(tx core.App) error {
+				ok, err := acceptRemindersVersion(tx, version)
+				if err != nil || !ok {
+					ignored = !ok
+					return err
+				}
+				return replaceReminders(tx, list)
+			})
+			if err != nil {
 				return err
 			}
-			return e.JSON(http.StatusOK, map[string]int{"count": len(list)})
+			return e.JSON(http.StatusOK, map[string]any{"count": len(list), "ignored": ignored})
 		})
 
 		api.DELETE("/reminders/{taskId}", func(e *core.RequestEvent) error {
@@ -121,6 +152,44 @@ func main() {
 		api.PUT("/calendar", calendarPut(app))
 		api.DELETE("/calendar", calendarDelete(app))
 
+		// Sync (phase 4): opaque records with a correlative version.
+		api.POST("/sync/push", func(e *core.RequestEvent) error {
+			var items []PushItem
+			if err := json.NewDecoder(http.MaxBytesReader(e.Response, e.Request.Body, 16<<20)).Decode(&items); err != nil {
+				return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid body"})
+			}
+			if err := validatePush(items); err != nil {
+				return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			results, latest, err := pushRecords(app, items)
+			if err != nil {
+				return err
+			}
+			changes.publish(latest)
+			return e.JSON(http.StatusOK, map[string]any{"results": results, "version": latest})
+		})
+
+		api.GET("/sync/pull", func(e *core.RequestEvent) error {
+			since, err := strconv.ParseInt(e.Request.URL.Query().Get("since"), 10, 64)
+			if err != nil || since < 0 {
+				since = 0
+			}
+			page, latest, more, err := pullRecords(app, since, pullLimit(e.Request.URL.Query().Get("limit")))
+			if err != nil {
+				return err
+			}
+			return e.JSON(http.StatusOK, map[string]any{"records": page, "version": latest, "more": more})
+		})
+
+		api.GET("/sync/events", func(e *core.RequestEvent) error {
+			latest, err := latestVersion(app)
+			if err != nil {
+				return err
+			}
+			serveEvents(e.Response, e.Request, changes, latest, heartbeat)
+			return nil
+		})
+
 		return se.Next()
 	})
 
@@ -134,6 +203,26 @@ func main() {
 		if err := sendDue(app, vapid, time.Now()); err != nil {
 			app.Logger().Error("sending reminders", "error", err)
 		}
+	})
+
+	// Empties the synced data, for instance before handing the server to
+	// someone else. Devices keep theirs and upload it again.
+	app.RootCmd.AddCommand(&cobra.Command{
+		Use:   "sync-reset",
+		Short: "Delete every synced record (devices keep their copy)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := app.Bootstrap(); err != nil {
+				return err
+			}
+			if err := ensureSyncCollections(app); err != nil {
+				return err
+			}
+			if err := resetSync(app); err != nil {
+				return err
+			}
+			log.Print("Synced data deleted.")
+			return nil
+		},
 	})
 
 	if err := app.Start(); err != nil {

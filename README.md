@@ -13,15 +13,20 @@ Es PocketBase usado como framework Go, con `webpush-go` para los avisos. Un úni
 ## API (todas con `Authorization: Bearer <clave>`)
 | Método y ruta | Qué hace |
 | --- | --- |
-| `GET /api/qadrant/ping` | Comprueba la URL y la clave |
+| `GET /api/qadrant/ping` | Comprueba la URL y la clave. Devuelve la versión de la API (`2`: con sincronización) y el `syncId` de los datos sincronizados |
 | `GET /api/qadrant/vapid` | Clave pública VAPID para suscribirse |
 | `POST /api/qadrant/subscriptions` | Guarda una suscripción (`PushSubscription.toJSON()`) |
 | `DELETE /api/qadrant/subscriptions` | Borra una suscripción (`{ "endpoint": … }`) |
-| `PUT /api/qadrant/reminders` | Sustituye la lista completa de recordatorios |
+| `PUT /api/qadrant/reminders` | Sustituye la lista completa de recordatorios. Con `?version=N` (dispositivos que sincronizan), ignora las listas que salen de una versión más antigua que la última recibida |
 | `DELETE /api/qadrant/reminders/{taskId}` | Borra los recordatorios de una tarea |
 | `GET /api/qadrant/calendar` | Estado del calendario y sus eventos ya expandidos (últimos 7 días y próximos 30) |
 | `PUT /api/qadrant/calendar` | Guarda la dirección secreta iCal (`{ "url": … }`, `https://` o `webcal://`) tras comprobar que se puede leer |
 | `DELETE /api/qadrant/calendar` | Quita el calendario |
+| `POST /api/qadrant/sync/push` | Lista de `{ collection, id, baseVersion, content }`. Acepta cada registro cuya versión siga siendo `baseVersion` y le da la siguiente; los demás vuelven con la versión y el contenido actuales |
+| `GET /api/qadrant/sync/pull?since=N&limit=200` | Registros con versión mayor que `N`, en orden, con `more` si hay más páginas y la versión más alta |
+| `GET /api/qadrant/sync/events` | SSE: un evento `version` al conectar y otro con cada cambio; latido cada 30 s |
+
+El servidor guarda `content` tal cual, sin leerlo: la fusión campo a campo la hace la app. `qadrant-server sync-reset --dir pb_data` borra los datos sincronizados; los dispositivos conservan los suyos y los vuelven a subir.
 
 El calendario se descarga cada 15 minutos; se expanden las repeticiones (`RRULE`, `EXDATE`) y las zonas horarias con la del servidor (`TZ=Europe/Madrid` en `qadrant.service`). La dirección solo se guarda aquí y nunca vuelve a la app.
 
@@ -71,7 +76,7 @@ El servidor escucha solo en `127.0.0.1:8090`: nada queda expuesto hasta que lo p
      - service: http_status:404
    ```
 4. `cloudflared service install && systemctl enable --now cloudflared`.
-5. Comprueba desde fuera: `curl -H "Authorization: Bearer <clave>" https://qadrant.tudominio.es/api/qadrant/ping` debe responder `{"ok":true,"version":1}`.
+5. Comprueba desde fuera: `curl -H "Authorization: Bearer <clave>" https://qadrant.tudominio.es/api/qadrant/ping` debe responder `{"ok":true,"version":2,…}`.
 
 El panel de PocketBase (`/_/`) queda accesible a través del túnel con tu superusuario. Si no lo quieres expuesto, añade en Cloudflare Access una regla para `/_/*`.
 
