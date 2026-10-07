@@ -6,9 +6,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/SherClockHolmes/webpush-go"
@@ -286,6 +289,11 @@ func sendDue(app core.App, vapid vapidKeys, now time.Time) error {
 				app.Logger().Warn("push failed", "error", err)
 				continue
 			}
+			if res.StatusCode >= 300 {
+				// Push services explain a refusal in the body (Apple: {"reason":"BadJwtToken"}).
+				reason, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+				app.Logger().Warn("push rejected", "status", res.StatusCode, "service", serviceHost(s.GetString("endpoint")), "reason", string(reason))
+			}
 			res.Body.Close()
 			// 404 and 410: the browser dropped the subscription.
 			if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
@@ -308,9 +316,23 @@ func sendDue(app core.App, vapid vapidKeys, now time.Time) error {
 }
 
 // subscriber is the VAPID contact; push services may use it to reach the owner.
+// webpush-go adds "mailto:" itself unless it is an https URL, so a configured
+// "mailto:" is dropped here: Apple refuses "mailto:mailto:…" (403 BadJwtToken)
+// while Mozilla and Google accept it.
 func subscriber() string {
-	if s := os.Getenv("QADRANT_VAPID_SUBJECT"); s != "" {
-		return s
+	s := strings.TrimSpace(os.Getenv("QADRANT_VAPID_SUBJECT"))
+	if s == "" {
+		return "admin@localhost"
 	}
-	return "mailto:admin@localhost"
+	return strings.TrimPrefix(s, "mailto:")
+}
+
+// serviceHost names the push service of an endpoint for the log, without the
+// rest of the address, which identifies the browser.
+func serviceHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
