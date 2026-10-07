@@ -45,7 +45,7 @@ func main() {
 		}
 		accessKey = key
 		if created {
-			log.Printf("Clave de acceso de Qadrant (pégala en Ajustes): %s", key)
+			log.Printf("Qadrant access key (paste it in Settings): %s", key)
 		}
 		if vapid, err = loadOrCreateVAPID(app.DataDir()); err != nil {
 			return err

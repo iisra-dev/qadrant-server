@@ -8,7 +8,7 @@ User=qadrant
 Group=qadrant
 WorkingDirectory=/opt/qadrant
 ExecStart=/opt/qadrant/qadrant-server serve --http 127.0.0.1:8090 --dir /opt/qadrant/pb_data
-Environment=QADRANT_VAPID_SUBJECT=mailto:tu-correo@example.com
+Environment=QADRANT_VAPID_SUBJECT=mailto:you@example.com
 # Days and all-day calendar events are computed in this time zone.
 Environment=TZ=Europe/Madrid
 Restart=on-failure
